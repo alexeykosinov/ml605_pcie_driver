@@ -24,10 +24,10 @@ static struct cdev ml605_cdev; // Global variable for the character device
 static struct device *ml605_device;
 
 
-static char ker_buf[100];
-static int operand_1 = 0;
+// static char ker_buf[100];
+// static int operand_1 = 0;
 
-volatile unsigned int *regA;
+// volatile unsigned int *regA;
 
 
 static struct pci_device_id pci_id_table[] = { 
@@ -98,10 +98,10 @@ void release_device(struct pci_dev *pdev) {
 	pci_disable_device(pdev);
 }
 
-static irqreturn_t ml605_pci_irq(int irq, void *lp){
-    printk("( ML605 PCIe ) [I] Interrupt Occured\n");
-    return IRQ_HANDLED;
-}
+// static irqreturn_t ml605_pci_irq(int irq, void *lp){
+//     printk("( ML605 PCIe ) [I] Interrupt Occured\n");
+//     return IRQ_HANDLED;
+// }
 
 
 /* 
@@ -169,7 +169,7 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
 	mmio_flags = pci_resource_flags(pdev, 0);
 
 	printk(KERN_INFO "( ML605 PCIe ) [I] BAR0 address range: %lX-%lX\n", mmio_start, mmio_end);
-	printk(KERN_INFO "( ML605 PCIe ) [I] BAR0 length %d\n", mmio_len);
+	printk(KERN_INFO "( ML605 PCIe ) [I] BAR0 length %ld\n", mmio_len);
 	printk(KERN_INFO "( ML605 PCIe ) [I] BAR0 flags %lX\n", mmio_flags);
 
     /*
@@ -243,7 +243,8 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
         return -1;
     }
 
-    ml605_device = device_create(driver_class, NULL, first, NULL, PCI_DRIVER_NAME);
+	// Y'll see the name in /dev/
+    ml605_device = device_create(driver_class, NULL, first, NULL, "ml605");
     if (ml605_device == NULL) {
         printk(KERN_INFO "( ML605 PCIe ) [E] Create device failed\n");
         class_destroy(driver_class);
@@ -277,39 +278,42 @@ static void pci_remove(struct pci_dev *pdev) {
 
 
 static int ml_open(struct inode *inod, struct file *fil){
-    printk(KERN_INFO "( ML605 PCIe ) [I] Character Device Opened\n");
+    printk(KERN_INFO "( ML605 PCIe ) [I] Char device opened\n");
     return 0;
 }
 
 static int ml_close(struct inode *inod, struct file *fil){
-    printk(KERN_INFO "( ML605 PCIe ) [I] Device closed\n");
+    printk(KERN_INFO "( ML605 PCIe ) [I] Char device closed\n");
     return 0;
 }
 
 // Just send to the user a string with the value of result
 static ssize_t ml_rd(struct file *fil, char *buf, size_t len, loff_t *off){
-    int n;
+    // int n;
     // Return the result only once (otherwise a simple cat will loop)
     // Copy from kernel space to user space
-    printk(KERN_INFO "( ML605 PCIe ) [I] Reading device rx: %d\n", (int) len);
+    // printk(KERN_INFO "( ML605 PCIe ) [I] Reading device rx: %d\n", (int) len);
 
-	n = sprintf(ker_buf, "%d\n", *regA);
+	// n = sprintf(ker_buf, "%d\n", *regA);
     // Copy back to user the result (to,from,size)
-    copy_to_user(buf, ker_buf, n);
-    printk(KERN_INFO "( ML605 PCIe ) [I] Returning %s rx: %d\n", ker_buf, n);
-    return n;
+    // copy_to_user(buf, ker_buf, n);
+    // printk(KERN_INFO "( ML605 PCIe ) [I] Returning %s rx: %d\n", ker_buf, n);
+    printk(KERN_INFO "( ML605 PCIe ) [I] Performing read operation\n");
+    // return n;
+    return 0;
 }
 
 // Parse the input stream ex: "50,2,*" to some operand variables.
 static ssize_t ml_wr(struct file *fil, const char *buf, size_t len, loff_t *off){
     // Get data from user space to kernel space
-    copy_from_user(ker_buf, buf, len);
-    sscanf(ker_buf,"%d%c", &operand_1);
-    ker_buf[len] = 0;
+    // copy_from_user(ker_buf, buf, len);
+    // sscanf(ker_buf,"%d%c", &operand_1);
+    // ker_buf[len] = 0;
     // Change the IP registers to the parsed operands (on rega and regb)
-    *regA = (unsigned int) operand_1;
-    printk(KERN_INFO "( ML605 PCIe ) [I] Receiving math operation <%d>\n", operand_1);
-    return len;
+    // *regA = (unsigned int) operand_1;
+    printk(KERN_INFO "( ML605 PCIe ) [I] Performing write operation\n");
+    // return len;
+    return 0;
 }
 
 

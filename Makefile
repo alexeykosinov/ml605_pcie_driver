@@ -1,5 +1,5 @@
-# Load module: sudo insmod pci_driver.ko
-#
+# Read perform	: cat /dev/ML605_PCIe
+# Write perform	: cat > /dev/ML605_PCIe
 CONFIG_MODULE_SIG=n
 BINARY		:= pci_driver
 KERNEL		:= /lib/modules/$(shell uname -r)/build
