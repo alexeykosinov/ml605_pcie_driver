@@ -2,12 +2,12 @@
 // Linux Device Drivers, PCI chapter https://static.lwn.net/images/pdf/LDD3/ch12.pdf
 // https://betontalpfa.medium.com/oh-no-i-need-to-write-a-pci-driver-2b389720a9d0
 
+
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/interrupt.h>
 #include <linux/platform_device.h>
-
 
 #include <linux/cdev.h>
 #include <linux/fs.h>
@@ -17,18 +17,11 @@
 #define PCI_VID				0x10EE 	/* Xilinx 			*/
 #define PCI_PID				0x0505 	/* Device ID 		*/
 
-/* Character device */
+/* Символьное устройство */
 static dev_t first;
 static struct class *driver_class = NULL;
-static struct cdev ml605_cdev; // Global variable for the character device
+static struct cdev ml605_cdev;
 static struct device *ml605_device;
-
-
-// static char ker_buf[100];
-// static int operand_1 = 0;
-
-// volatile unsigned int *regA;
-
 
 static struct pci_device_id pci_id_table[] = { 
 	{ PCI_DEVICE(PCI_VID, PCI_PID), }, 
@@ -36,28 +29,24 @@ static struct pci_device_id pci_id_table[] = {
 };
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Alexey Kosinov");
+MODULE_AUTHOR("Alexey");
 MODULE_DESCRIPTION("ML605 PCIe x4");
 MODULE_VERSION("0.1");
 MODULE_DEVICE_TABLE(pci, pci_id_table);
 
+static int 		pci_probe(struct pci_dev *pdev, const struct pci_device_id *id);
+static void 	pci_remove(struct pci_dev *pdev);
 
-static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *id);
-static void pci_remove(struct pci_dev *pdev);
-
-
-/* Character callbacks prototype */
-
-static int 		ml_open(struct inode *inod, struct file *fil);
-static int 		ml_close(struct inode *inod, struct file *fil);
-static ssize_t 	ml_rd(struct file *fil, char *buf, size_t len, loff_t *off);
-static ssize_t 	ml_wr(struct file *fil, const char *buf, size_t len, loff_t *off);
+static int 		ml605_open(struct inode *inod, struct file *fil);
+static int 		ml605_close(struct inode *inod, struct file *fil);
+static ssize_t 	ml605_read(struct file *fil, char *buf, size_t len, loff_t *off);
+static ssize_t 	ml605_write(struct file *fil, const char *buf, size_t len, loff_t *off);
 
 static struct file_operations fops = {
-	.read	 = ml_rd,
-	.write	 = ml_wr,
-	.open	 = ml_open,
-	.release = ml_close,
+	.read	 = ml605_read,
+	.write	 = ml605_write,
+	.open	 = ml605_open,
+	.release = ml605_close,
 };
 
 
@@ -74,34 +63,28 @@ static struct pci_driver pci_drv = {
 	.remove 	= pci_remove
 };
 
-
-
-
 /* Указатель на память ввода/вывода устройства */
 struct pci_driver_priv {
 	int irq;
 	void __iomem *base_addr; 
 };
 
-
-
 /* Регистрации драйвера */
-static int __init pci_init(void) {
-	return pci_register_driver(&pci_drv); 
-}
+static int __init pci_init(void) { return pci_register_driver(&pci_drv); }
 
 /* Выгрузка драйвера */
 static void __exit pci_exit(void) { pci_unregister_driver(&pci_drv); }
 
 void release_device(struct pci_dev *pdev) {
+    free_irq(pdev->irq, pdev);
 	pci_release_region(pdev, pci_select_bars(pdev, IORESOURCE_MEM));
 	pci_disable_device(pdev);
 }
 
-// static irqreturn_t ml605_pci_irq(int irq, void *lp){
-//     printk("( ML605 PCIe ) [I] Interrupt Occured\n");
-//     return IRQ_HANDLED;
-// }
+static irqreturn_t ml605_pci_irq(int irq, void *lp){
+    printk("( ML605 PCIe ) [I] Interrupt Occured\n");
+    return IRQ_HANDLED;
+}
 
 
 /* 
@@ -116,24 +99,25 @@ void release_device(struct pci_dev *pdev) {
 */
 
 static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
-
+	// int i = 0;
 	int err;
 	u16 vendor, device, status;
 	u8 irq, cashline, lattimer;
-	unsigned long mmio_start;
-	unsigned long mmio_end;
-	unsigned long mmio_len;
-	unsigned long mmio_flags;
+	
+	resource_size_t mmio_start;
+	resource_size_t mmio_end;
+	resource_size_t mmio_len;
+	resource_size_t mmio_flags;
 
-	struct pci_driver_priv *test_priv = NULL;
+	struct pci_driver_priv *bar0_priv = NULL;
 
-	/* В качестве теста пробуем считать VID и PID устройства */
-	pci_read_config_word(pdev, PCI_VENDOR_ID, &vendor); // Чтение фирмы изготовителя устройства
-	pci_read_config_word(pdev, PCI_DEVICE_ID, &device); // Чтения ID устройства
-	pci_read_config_byte(pdev, PCI_INTERRUPT_LINE, &irq);
-	pci_read_config_word(pdev, PCI_STATUS, &status);
-	pci_read_config_byte(pdev, PCI_CACHE_LINE_SIZE, &cashline);
-	pci_read_config_byte(pdev, PCI_LATENCY_TIMER, &lattimer);
+
+	pci_read_config_word(pdev, PCI_VENDOR_ID, &vendor); 		// Регистр фирмы изготовителя устройства
+	pci_read_config_word(pdev, PCI_DEVICE_ID, &device); 		// Регистр ID устройства
+	pci_read_config_byte(pdev, PCI_INTERRUPT_LINE, &irq);		// Регистр прерываний
+	pci_read_config_word(pdev, PCI_STATUS, &status);			// Регистр статуса
+	pci_read_config_byte(pdev, PCI_CACHE_LINE_SIZE, &cashline);	// 
+	pci_read_config_byte(pdev, PCI_LATENCY_TIMER, &lattimer);	// 
 
 	printk(KERN_INFO "( ML605 PCIe ) [I] Initialization process...");
 	printk(KERN_INFO "( ML605 PCIe ) [I] VID/PID  : 0x%04X/0x%04X\n", vendor, device);
@@ -142,41 +126,34 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
 
 
 	/* Инициализируем память устройства
-	* Initialize device before it's used by a driver.s
-	* Ask low-level code to enable Memory resources.
-	* Wake up the device if it was suspended.
-	* Beware, this function can fail.
+	* Initialize device before it's used by a driver
+	* Ask low-level code to enable Memory resources
+	* Wake up the device if it was suspended
+	* Beware, this function can fail
 	*/
 	err = pci_enable_device_mem(pdev);
 	//err = pci_enable_device(pdev);
 	//err = pcim_enable_device(pdev);
 	if (err) { 
 		printk(KERN_INFO "( ML605 PCIe ) [E] Enabling the PCI Device: %d\n", err);
-		return err; 
+		return err;
 	}
 
-    // err = request_irq(test_priv->irq, &ml605_pci_irq, 0, "ML605_Driver", NULL);
-	// if (err <= 0) {
-	// 	printk(KERN_INFO "( ML605 PCIe ) [E] Could not allocate interrupt %d : %d\n", test_priv->irq, err);
-	// 	return -ENODEV;
-	// }
-
-
-	/* Второй аргумент это один из шести 0-5 base address registers (BARs) */
+	/* Второй аргумент это один из шести [0-5] базовых адресных регистров (BARs) */
 	mmio_start = pci_resource_start(pdev, 0);
 	mmio_end = pci_resource_end(pdev, 0);
 	mmio_len = pci_resource_len(pdev, 0);
 	mmio_flags = pci_resource_flags(pdev, 0);
 
-	printk(KERN_INFO "( ML605 PCIe ) [I] BAR0 address range: %lX-%lX\n", mmio_start, mmio_end);
-	printk(KERN_INFO "( ML605 PCIe ) [I] BAR0 length %ld\n", mmio_len);
-	printk(KERN_INFO "( ML605 PCIe ) [I] BAR0 flags %lX\n", mmio_flags);
+	printk(KERN_INFO "( ML605 PCIe ) [I] BAR0 address range: 0x%llX-0x%llX\n", mmio_start, mmio_end);
+	printk(KERN_INFO "( ML605 PCIe ) [I] BAR0 length %lld\n", mmio_len);
+	printk(KERN_INFO "( ML605 PCIe ) [I] BAR0 flags 0x%llX\n", mmio_flags);
+
 
     /*
     * The following sequence checks if the resource is in the
     * IO/Memory/Interrupt/DMA address space
     */
-   
     if(mmio_flags & IORESOURCE_IO) {
         printk("( ML605 PCIe ) [I] IORESOURCE_IO\n");
     }
@@ -195,47 +172,89 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
         printk("( ML605 PCIe ) [I] IORESOURCE_DMA\n");
     }
     else {
-        printk("( ML605 PCIe ) [I] NOTHING\n");
+        printk("( ML605 PCIe ) [E] NOTHING\n");
     }
 	
 
-	/* Запрашиваем необходимый регион памяти, с определенным ранее типом
+	/* Запрашиваем необходимый регион памяти
 	* Mark the PCI region associated with PCI device pdev BAR bar as being reserved by owner res_name.
 	* Do not access any address inside the PCI regions unless this call returns successfully.
 	* Returns 0 on success, or EBUSY on error.
 	* A warning message is also printed on failure.
 	*/
 	err = pci_request_region(pdev, 0, PCI_DRIVER_NAME);
-
 	if (err) {
 		printk(KERN_INFO "( ML605 PCIe ) [E] Request Region: %d\n", err);
 		pci_disable_device(pdev);
 		return -ENODEV;
 	}
 
-	test_priv = kzalloc(sizeof(struct pci_driver_priv), GFP_KERNEL);
-	if (!test_priv) {
+	/* Выделяем память */
+	bar0_priv = kzalloc(sizeof(struct pci_driver_priv), GFP_KERNEL);
+	if (!bar0_priv) {
 		release_device(pdev);
 		return -ENOMEM;
 	}
 
 	/* отображаем выделенную память к аппаратуре */
-	test_priv->base_addr = ioremap(mmio_start, mmio_len);
-	if (!test_priv->base_addr) {
-		release_device(pdev);
+	if((bar0_priv->base_addr = ioremap(mmio_start, mmio_len)) == NULL) {
+		printk(KERN_INFO "( ML605 PCIe ) [E] Memmory error BAR0\n");
 		return -EIO;
 	}
 
-	pci_set_drvdata(pdev, test_priv);
+    /* Set driver private data */
+    /* Now we can access mapped "base_addr" from the any driver's function */
+	pci_set_drvdata(pdev, bar0_priv);
 
-    // ****************** NORMAL Device diver *************************
-    // register a range of char device numbers
+
+    /* Проверка записи */
+    //iowrite32(0xDEADBEEF, bar0_priv->base_addr);
+
+	/* Проверка чтения */
+	printk(KERN_INFO "( ML605 PCIe ) [I] CDMA Status: 0x%X\n", ioread32(bar0_priv->base_addr + 0xC004));
+	printk(KERN_INFO "( ML605 PCIe ) [I] AXIBAR2PCIEBAR_0U: 0x%X\n", ioread32(bar0_priv->base_addr + 0x8208));
+	printk(KERN_INFO "( ML605 PCIe ) [I] AXIBAR2PCIEBAR_0l: 0x%X\n", ioread32(bar0_priv->base_addr + 0x820C));
+	printk(KERN_INFO "( ML605 PCIe ) [I] AXIBAR2PCIEBAR_1U: 0x%X\n", ioread32(bar0_priv->base_addr + 0x8210));
+	printk(KERN_INFO "( ML605 PCIe ) [I] AXIBAR2PCIEBAR_1L: 0x%X\n", ioread32(bar0_priv->base_addr + 0x8214));
+
+
+	/* Включение MSI прерываний */
+	if (!pci_enable_msi(pdev)) {
+		if (!pdev->msi_enabled) { 
+			printk(KERN_INFO "( ML605 PCIe ) [E] MSI interrupt disabled\n");
+		}
+	}
+
+	/* 
+	* Запрос и установка коллбека функции прерываний 
+	* Проверить корректность можно через cat /proc/interrupts
+	* Там должен быть устройство с названием PCI_DRIVER_NAME
+	* Там же можно увидеть номер прерывания
+	*/
+	err = request_irq(pdev->irq, ml605_pci_irq, IRQF_SHARED, PCI_DRIVER_NAME, pdev);
+	if (err < 0) {
+		printk(KERN_INFO "( ML605 PCIe ) [E] Could not request MSI interrupt №%d, error %d\n", pdev->irq, err);
+	}
+
+
+
+    /* Доступ к устройству со стороны пользовательского пространства */
+
+    /* 
+	* Allocates a range of char device numbers
+	* The major number will be chosen dynamically, and returned (along with the first minor number) in dev
+	* Returns zero or a negative error code
+	*/
     if (alloc_chrdev_region(&first, 0, 1, PCI_DRIVER_NAME) < 0) {
         printk(KERN_INFO "( ML605 PCIe ) [E] Allocates a range of char device numbers is failed\n");
         return -1;
     }
 
-    // Create class (/sysfs)
+	/*
+	* This is used to create a struct class pointer that can then be used in calls to device_create.
+	* Returns struct class pointer on success, or ERR_PTR on error.
+	* Note, the pointer created here is to be destroyed when finished by making a call to class_destroy.
+	*/
     driver_class = class_create(THIS_MODULE, "ML605_DRIVER_CLASS");
     if (driver_class == NULL) {
         printk(KERN_INFO "( ML605 PCIe ) [E] Create class failed\n");
@@ -243,7 +262,13 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
         return -1;
     }
 
-	// Y'll see the name in /dev/
+	/* 
+	* Simple interfaces attached to a subsystem. 
+	* Multiple interfaces can attach to a subsystem and its devices. 
+	* Unlike drivers, they do not exclusively claim or control devices. 
+	* Interfaces usually represent a specific functionality of a subsystem/class of devices.
+	* Y'll see the name in /dev/*
+	*/
     ml605_device = device_create(driver_class, NULL, first, NULL, "ml605");
     if (ml605_device == NULL) {
         printk(KERN_INFO "( ML605 PCIe ) [E] Create device failed\n");
@@ -252,7 +277,9 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
         return -1;
     }
 
-    // Create a character device /dev/tutDevice
+	/*
+	* Initializes cdev, remembering fops, making it ready to add to the system with cdev_add
+	*/
     cdev_init(&ml605_cdev, &fops);
     if (cdev_add(&ml605_cdev, first, 1) == -1){
         printk(KERN_INFO "( ML605 PCIe ) [E] Create character device failed\n");
@@ -270,25 +297,28 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
 
 /* Освобождение занятых ресурсов */
 static void pci_remove(struct pci_dev *pdev) {
-	struct pci_driver_priv *test_priv = pci_get_drvdata(pdev);
-	if (test_priv) { kfree(test_priv); } // освободить память ввода/вывода
-	pci_disable_device(pdev);
+	struct pci_driver_priv *bar0_priv = pci_get_drvdata(pdev);
+	if (bar0_priv) { 
+		if (bar0_priv->base_addr) {
+			iounmap(bar0_priv->base_addr);
+		}
+		pci_free_irq_vectors(pdev);
+		kfree(bar0_priv); 
+	}
+	release_device(pdev);
 }
 
-
-
-static int ml_open(struct inode *inod, struct file *fil){
+static int ml605_open(struct inode *inod, struct file *fil){
     printk(KERN_INFO "( ML605 PCIe ) [I] Char device opened\n");
     return 0;
 }
 
-static int ml_close(struct inode *inod, struct file *fil){
+static int ml605_close(struct inode *inod, struct file *fil){
     printk(KERN_INFO "( ML605 PCIe ) [I] Char device closed\n");
     return 0;
 }
 
-// Just send to the user a string with the value of result
-static ssize_t ml_rd(struct file *fil, char *buf, size_t len, loff_t *off){
+static ssize_t ml605_read(struct file *fil, char *buf, size_t len, loff_t *off){
     // int n;
     // Return the result only once (otherwise a simple cat will loop)
     // Copy from kernel space to user space
@@ -303,8 +333,7 @@ static ssize_t ml_rd(struct file *fil, char *buf, size_t len, loff_t *off){
     return 0;
 }
 
-// Parse the input stream ex: "50,2,*" to some operand variables.
-static ssize_t ml_wr(struct file *fil, const char *buf, size_t len, loff_t *off){
+static ssize_t ml605_write(struct file *fil, const char *buf, size_t len, loff_t *off){
     // Get data from user space to kernel space
     // copy_from_user(ker_buf, buf, len);
     // sscanf(ker_buf,"%d%c", &operand_1);
