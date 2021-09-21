@@ -106,6 +106,8 @@ struct pci_driver_priv {
 };
 
 struct pci_driver_priv *axi_dma = NULL;
+// struct pci_driver_priv *axi_pci = NULL;
+// struct pci_driver_priv *axi_ddr = NULL;
 
 
 /* Регистрации драйвера */
@@ -141,6 +143,18 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
         return -ENOMEM;
     }
 
+    // axi_pci = kzalloc(sizeof(struct pci_driver_priv), GFP_KERNEL);
+    // if (!axi_pci) {
+    //     release_device(pdev);
+    //     return -ENOMEM;
+    // }
+
+    // axi_ddr = kzalloc(sizeof(struct pci_driver_priv), GFP_KERNEL);
+    // if (!axi_ddr) {
+    //     release_device(pdev);
+    //     return -ENOMEM;
+    // }
+
     /* Инициализируем память устройства
     * Initialize device before it's used by a driver
     * Ask low-level code to enable Memory resources
@@ -159,6 +173,8 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
 
 
     pci_set_drvdata(pdev, axi_dma);
+    // pci_set_drvdata(pdev, axi_pci);
+    // pci_set_drvdata(pdev, axi_ddr);
 
 	err = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
     if (err) {
@@ -190,9 +206,11 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
     printk(KERN_INFO "( ML605 PCIe ) [I] Status	            : 0x%04X\n", status);
     printk(KERN_INFO "( ML605 PCIe ) [I] Cash Line          : 0x%02X\n", cashline);
     printk(KERN_INFO "( ML605 PCIe ) [I] Latency Timer      : 0x%02X\n", lattimer);
+    
     printk(KERN_INFO "( ML605 PCIe ) [I] BAR0 Flags         : 0x%llX\n", axi_dma->flags);
     printk(KERN_INFO "( ML605 PCIe ) [I] BAR0 Address Range : 0x%llX-0x%llX\n", axi_dma->start, axi_dma->end);
     printk(KERN_INFO "( ML605 PCIe ) [I] BAR0 Length        : %lld\n", axi_dma->length);
+
 
 
     /*
@@ -209,6 +227,7 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
         return -ENOMEM;
     }
   
+
     /* Включение MSI прерываний */
     if (!pci_enable_msi(pdev)) {
         if (!pdev->msi_enabled) { 
@@ -239,12 +258,15 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
     * Returns 0 on success, or EBUSY on error.
     * A warning message is also printed on failure.
     */
-    err = pci_request_region(pdev, 0, PCI_DRIVER_NAME);
+    err = pci_request_regions(pdev, PCI_DRIVER_NAME);
     if (err) {
         printk(KERN_INFO "( ML605 PCIe ) [E] PCIe request regions failed, %d\n", err);
         pci_disable_device(pdev);
         return -ENODEV;
     }
+
+
+
 
     pci_set_master(pdev);
 
@@ -252,11 +274,10 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
     printk(KERN_INFO "( ML605 PCIe ) [I] MM2S DMA Status Register        : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_MM2S_DMASR));
     printk(KERN_INFO "( ML605 PCIe ) [I] MM2S Current Descriptor Pointer : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_MM2S_CURDESC));
     printk(KERN_INFO "( ML605 PCIe ) [I] MM2S Tail Descriptor Pointer    : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_MM2S_TAILDESC));
-    printk(KERN_INFO "( ML605 PCIe ) [I] Scatter/Gather User and Cache   : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_SG_CTL));
-    printk(KERN_INFO "( ML605 PCIe ) [I] S2MM DMA Control Register       : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_S2MM_DMACR));
-    printk(KERN_INFO "( ML605 PCIe ) [I] S2MM DMA Status Register        : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_S2MM_DMASR));
-    printk(KERN_INFO "( ML605 PCIe ) [I] S2MM Current Descriptor Pointer : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_S2MM_CURDESC));
-    printk(KERN_INFO "( ML605 PCIe ) [I] S2MM Tail Descriptor Pointer    : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_S2MM_TAILDESC));
+    printk(KERN_INFO "( ML605 PCIe ) [I] Scatter/Gather User and Cache   : 0x%08X\n", ioread32(axi_dma->base_addr + 0x18));
+    printk(KERN_INFO "( ML605 PCIe ) [I] S2MM DMA Control Register       : 0x%08X\n", ioread32(axi_dma->base_addr + 0x20));
+    printk(KERN_INFO "( ML605 PCIe ) [I] S2MM DMA Status Register        : 0x%08X\n", ioread32(axi_dma->base_addr + 0x28));
+
 
     dma_sync_single_for_cpu(&pdev->dev, dma_handle, DMA_BUFFER_SIZE, DMA_TO_DEVICE);
 

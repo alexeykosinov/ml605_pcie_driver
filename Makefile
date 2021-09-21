@@ -22,6 +22,9 @@ install:
 	cp $(BINARY).ko $(TARGET_PATH)
 	depmod -a
 
+remove:
+	rm $(TARGET_PATH)/$(BINARY).ko 
+
 clean:
 	rm -rf *.o
 	rm -rf *.order
