@@ -2,7 +2,6 @@
 // Linux Device Drivers, PCI chapter https://static.lwn.net/images/pdf/LDD3/ch12.pdf
 // https://betontalpfa.medium.com/oh-no-i-need-to-write-a-pci-driver-2b389720a9d0
 
-
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/pci.h>
@@ -38,6 +37,7 @@
 
 #define AXI_DMA_DMASR_MASK_IDLE 0x00000002  /* DMASR Status Idle Bit Mask       */
 
+/* AXI Base Address Translation Configuration Registers */
 #define AXIBAR2PCIEBAR_0U       0X208
 #define AXIBAR2PCIEBAR_0L       0X20C
 
@@ -50,7 +50,7 @@ static void *dmabuf = NULL;
 static dma_addr_t dma_handle = 0;
 
 /* Символьное устройство */
-static dev_t first;
+static dev_t  first;
 static struct class *driver_class = NULL;
 static struct cdev ml605_cdev;
 static struct device *ml605_device;
@@ -81,12 +81,11 @@ static struct file_operations fops = {
     .release = ml605_close,
 };
 
-
 /*
-* name 		— Уникальное имя драйвера, которое будет использовано ядром в /sys/bus/pci/drivers
-* id_table 	— Таблица пар Vendor ID и Product ID, с которым может работать драйвер.
-* probe 	— Функция вызываемая ядром после загрузки драйвера, служит для инициализации оборудования
-* remove 	— Функция вызываемая ядром при выгрузке драйвера, служит для освобождения каких-либо ранее занятых ресурсов
+* name 		- Уникальное имя драйвера, которое будет использовано ядром в /sys/bus/pci/drivers
+* id_table 	- Таблица пар Vendor ID и Product ID, с которым может работать драйвер.
+* probe 	- Функция вызываемая ядром после загрузки драйвера, служит для инициализации оборудования
+* remove 	- Функция вызываемая ядром при выгрузке драйвера, служит для освобождения каких-либо ранее занятых ресурсов
 */
 static struct pci_driver pci_drv = {
     .name 		= PCI_DRIVER_NAME,
@@ -106,9 +105,7 @@ struct pci_driver_priv {
 };
 
 struct pci_driver_priv *axi_dma = NULL;
-// struct pci_driver_priv *axi_pci = NULL;
-// struct pci_driver_priv *axi_ddr = NULL;
-
+struct pci_driver_priv *axi_pci = NULL;
 
 /* Регистрации драйвера */
 static int __init pci_init(void) { return pci_register_driver(&pci_drv); }
@@ -134,7 +131,6 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
     int i;
     int err;
     u16 vendor, device, status;
-    // unsigned short reg16;
     u8 irq, cashline, lattimer;
 
     axi_dma = kzalloc(sizeof(struct pci_driver_priv), GFP_KERNEL);
@@ -143,17 +139,12 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
         return -ENOMEM;
     }
 
-    // axi_pci = kzalloc(sizeof(struct pci_driver_priv), GFP_KERNEL);
-    // if (!axi_pci) {
-    //     release_device(pdev);
-    //     return -ENOMEM;
-    // }
+    axi_pci = kzalloc(sizeof(struct pci_driver_priv), GFP_KERNEL);
+    if (!axi_pci) {
+        release_device(pdev);
+        return -ENOMEM;
+    }
 
-    // axi_ddr = kzalloc(sizeof(struct pci_driver_priv), GFP_KERNEL);
-    // if (!axi_ddr) {
-    //     release_device(pdev);
-    //     return -ENOMEM;
-    // }
 
     /* Инициализируем память устройства
     * Initialize device before it's used by a driver
@@ -173,8 +164,7 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
 
 
     pci_set_drvdata(pdev, axi_dma);
-    // pci_set_drvdata(pdev, axi_pci);
-    // pci_set_drvdata(pdev, axi_ddr);
+    pci_set_drvdata(pdev, axi_pci);
 
 	err = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
     if (err) {
@@ -194,11 +184,17 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
     pci_read_config_word(pdev, PCI_STATUS, &status);			// Регистр статуса
     pci_read_config_byte(pdev, PCI_CACHE_LINE_SIZE, &cashline);	// 
     pci_read_config_byte(pdev, PCI_LATENCY_TIMER, &lattimer);	// 
+
     /* Второй аргумент это один из шести [0-5] базовых адресных регистров (BARs) */
     axi_dma->start  = pci_resource_start(pdev,  0);
     axi_dma->end    = pci_resource_end(pdev,    0);
     axi_dma->length = pci_resource_len(pdev,    0);
     axi_dma->flags  = pci_resource_flags(pdev,  0);
+
+    axi_pci->start  = pci_resource_start(pdev,  1);
+    axi_pci->end    = pci_resource_end(pdev,    1);
+    axi_pci->length = pci_resource_len(pdev,    1);
+    axi_pci->flags  = pci_resource_flags(pdev,  1);
 
     printk(KERN_INFO "( ML605 PCIe ) [I] Initialization process...");
     printk(KERN_INFO "( ML605 PCIe ) [I] VID/PID            : 0x%04X/0x%04X\n", vendor, device);
@@ -211,22 +207,34 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
     printk(KERN_INFO "( ML605 PCIe ) [I] BAR0 Address Range : 0x%llX-0x%llX\n", axi_dma->start, axi_dma->end);
     printk(KERN_INFO "( ML605 PCIe ) [I] BAR0 Length        : %lld\n", axi_dma->length);
 
-
+    printk(KERN_INFO "( ML605 PCIe ) [I] BAR1 Flags         : 0x%llX\n", axi_pci->flags);
+    printk(KERN_INFO "( ML605 PCIe ) [I] BAR1 Address Range : 0x%llX-0x%llX\n", axi_pci->start, axi_pci->end);
+    printk(KERN_INFO "( ML605 PCIe ) [I] BAR1 Length        : %lld\n", axi_pci->length);
 
     /*
     * The following sequence checks if the resource is in the
     * IO/Memory/Interrupt/DMA address space
     */
     if (!(axi_dma->flags & IORESOURCE_MEM)) {
-        printk("( ML605 PCIe ) [E] CDMA MEM not found\n");
+        printk("( ML605 PCIe ) [E] BAR0 IORESOURCE_MEM flag return zero\n");
         return -ENODEV;
     }
   
     if ((axi_dma->base_addr = ioremap(axi_dma->start, axi_dma->length)) == NULL) {
-        printk(KERN_INFO "( ML605 PCIe ) [E] Memmory error BAR1\n");
+        printk(KERN_INFO "( ML605 PCIe ) [E] Host couldn't remap BAR0\n");
         return -ENOMEM;
     }
   
+
+    if (!(axi_pci->flags & IORESOURCE_MEM)) {
+        printk("( ML605 PCIe ) [E] BAR1 IORESOURCE_MEM flag return zero\n");
+        return -ENODEV;
+    }
+  
+    if ((axi_pci->base_addr = ioremap(axi_pci->start, axi_pci->length)) == NULL) {
+        printk(KERN_INFO "( ML605 PCIe ) [E] Host couldn't remap BAR1\n");
+        return -ENOMEM;
+    }
 
     /* Включение MSI прерываний */
     if (!pci_enable_msi(pdev)) {
@@ -258,14 +266,19 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
     * Returns 0 on success, or EBUSY on error.
     * A warning message is also printed on failure.
     */
-    err = pci_request_regions(pdev, PCI_DRIVER_NAME);
+    err = pci_request_region(pdev, 0, PCI_DRIVER_NAME);
     if (err) {
         printk(KERN_INFO "( ML605 PCIe ) [E] PCIe request regions failed, %d\n", err);
         pci_disable_device(pdev);
         return -ENODEV;
     }
 
-
+    err = pci_request_region(pdev, 1, PCI_DRIVER_NAME);
+    if (err) {
+        printk(KERN_INFO "( ML605 PCIe ) [E] PCIe request regions failed, %d\n", err);
+        pci_disable_device(pdev);
+        return -ENODEV;
+    }
 
 
     pci_set_master(pdev);
@@ -274,10 +287,26 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
     printk(KERN_INFO "( ML605 PCIe ) [I] MM2S DMA Status Register        : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_MM2S_DMASR));
     printk(KERN_INFO "( ML605 PCIe ) [I] MM2S Current Descriptor Pointer : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_MM2S_CURDESC));
     printk(KERN_INFO "( ML605 PCIe ) [I] MM2S Tail Descriptor Pointer    : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_MM2S_TAILDESC));
-    printk(KERN_INFO "( ML605 PCIe ) [I] Scatter/Gather User and Cache   : 0x%08X\n", ioread32(axi_dma->base_addr + 0x18));
-    printk(KERN_INFO "( ML605 PCIe ) [I] S2MM DMA Control Register       : 0x%08X\n", ioread32(axi_dma->base_addr + 0x20));
-    printk(KERN_INFO "( ML605 PCIe ) [I] S2MM DMA Status Register        : 0x%08X\n", ioread32(axi_dma->base_addr + 0x28));
+    printk(KERN_INFO "( ML605 PCIe ) [I] Scatter/Gather User and Cache   : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_SG_CTL));
+    printk(KERN_INFO "( ML605 PCIe ) [I] S2MM DMA Control Register       : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_S2MM_DMACR));
+    printk(KERN_INFO "( ML605 PCIe ) [I] S2MM DMA Status Register        : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_S2MM_DMASR));
+    printk(KERN_INFO "( ML605 PCIe ) [I] S2MM Current Descriptor Pointer : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_S2MM_CURDESC));
+    printk(KERN_INFO "( ML605 PCIe ) [I] S2MM Tail Descriptor Pointer    : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_S2MM_TAILDESC));
 
+    printk(KERN_INFO "( ML605 PCIe ) [I] Read PCI PID/VID Register       : 0x%08X\n", ioread32(axi_pci->base_addr));
+
+    printk(KERN_INFO "( ML605 PCIe ) [I] AXI Base Address Translation Configuration\n");
+    printk(KERN_INFO "( ML605 PCIe ) [I] Current Lower Address of BAR0   : 0x%08X\n", ioread32(axi_pci->base_addr + AXIBAR2PCIEBAR_0L));
+    printk(KERN_INFO "( ML605 PCIe ) [I] Current Upper Address of BAR0   : 0x%08X\n", ioread32(axi_pci->base_addr + AXIBAR2PCIEBAR_0U));
+
+    /* 
+    * When the BAR is set to a 32-bit address space, then the translation vector should be placed into the
+    * AXIBAR2PCIEBAR_nL register where n is the BAR number. When the BAR is set to a 64-bit
+    * address space, then the translation’s most significant 32 bits are written into the
+    * AXIBAR2PCIEBAR_nU and the least significant 32 bits are written into AXIBAR2PCIEBAR_nL.
+    */
+    iowrite32(dma_handle, axi_pci->base_addr + AXIBAR2PCIEBAR_0L);
+    printk(KERN_INFO "( ML605 PCIe ) [I] Updated Lower Address of BAR0   : 0x%08X\n", ioread32(axi_pci->base_addr + AXIBAR2PCIEBAR_0L));
 
     dma_sync_single_for_cpu(&pdev->dev, dma_handle, DMA_BUFFER_SIZE, DMA_TO_DEVICE);
 
@@ -287,22 +316,8 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
 
     dma_sync_single_for_device(&pdev->dev, dma_handle, DMA_BUFFER_SIZE, DMA_TO_DEVICE);
 
-    // iowrite32(dma_handle, axi_dma->base_addr + CDMA_SA);   // Уставновка адреса источника 
-    // iowrite32(0xC0000000, axi_dma->base_addr + CDMA_DA); 	// Устанвка адреса назначеня, адрес ddr в пространстве CDMA в ПЛИС
-    // iowrite32(0x100, axi_dma->base_addr + CDMA_BTT);		// Передать 100 байт
 
-    // mdelay(100);
 
-    // i = 0;
-    // while(!(ioread32(axi_dma->base_addr + AXI_DMA_MM2S_DMASR) & AXI_DMA_DMASR_MASK_IDLE)) {
-    // 	if (i == 10000) {
-    // 		printk(KERN_INFO "( ML605 PCIe ) [I] CDMASR IDLE : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_MM2S_DMASR));
-    // 		break;
-    // 	}
-    // 	else {
-    // 		i++;
-    // 	}
-    // }
 
 
 

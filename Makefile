@@ -18,6 +18,8 @@ $(BINARY)-y := $(OBJECTS)
 $(BINARY).ko:
 	make -C $(KERNEL) M=$(KMOD_DIR) modules
 
+all: $(BINARY).ko install
+
 install:
 	cp $(BINARY).ko $(TARGET_PATH)
 	depmod -a
