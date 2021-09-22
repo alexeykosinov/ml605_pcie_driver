@@ -43,6 +43,13 @@
 
 static void *dmabuf = NULL;
 
+#define DESC_COUNT 8
+#define BUFFER_SIZE 512
+u8 TxBuffer[DESC_COUNT][BUFFER_SIZE];
+u8 RxBuffer[DESC_COUNT][BUFFER_SIZE];
+
+
+
 /*
 * This type can hold any valid DMA address for the platform and should be used
 * everywhere you hold a DMA address returned from the DMA mapping functions.
@@ -51,21 +58,27 @@ static dma_addr_t dma_handle = 0;
 
 /* Дескриптор AXI DMA Engine */
 struct axi_dma_sg {
-    u32 NEXTDESC;           //
-    u32 NEXTDESC_MSB;       //
-    u32 BUFFER_ADDRESS;     //
-    u32 BUFFER_ADDRESS_MSB; //
-    u32 RESERVED[2];        // не используется
-    u32 CONTROL;            //
-    u32 STATUS;             //
-    u32 APP[5];             //
-    u32 PADDING[3];         // выравнивание до 64 Б
+    u32 nxtdesc;           //
+    u32 nxtdesc_msb;       //
+    u32 buffer_address;     //
+    u32 buffer_address_msb; //
+    u32 reserved[2];        // не используется
+    u32 control;            //
+    u32 status;             //
+    u32 app[5];             //
+    u32 padding[3];         // выравнивание до 64 Б
 } __attribute__((aligned(64)));
 
+struct axi_dma {
+	volatile char* register_space;
+	volatile int rx_done;
+	volatile int tx_done;
+};
 
-
-
-
+struct axi_dma_buffer {
+	void *data;
+	size_t size;
+};
 
 
 /* Символьное устройство */
@@ -93,6 +106,11 @@ static int 		ml605_close(struct inode *inod, struct file *fil);
 static ssize_t 	ml605_read(struct file *fil, char *buf, size_t len, loff_t *off);
 static ssize_t 	ml605_write(struct file *fil, const char *buf, size_t len, loff_t *off);
 
+
+void dma_sg_init(struct axi_dma_sg *sg, struct axi_dma_buffer *buffer, size_t pkt_size);
+void read_dma_sg(struct axi_dma *dma, struct axi_dma_sg *sg);
+void write_dma_sg(struct axi_dma *dma, struct axi_dma_sg *sg);
+
 static struct file_operations fops = {
     .read	 = ml605_read,
     .write	 = ml605_write,
@@ -117,6 +135,7 @@ static struct pci_driver pci_drv = {
 struct pci_driver_priv {
     int             irq;
     void __iomem    *base_addr;
+    /* resource_size_t - CPU physical addresses */
     resource_size_t start;
     resource_size_t end;
     resource_size_t length;
@@ -152,6 +171,45 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
     u16 vendor, device, status;
     u8 irq, cashline, lattimer;
 
+
+
+    /* AXI DMA Stuff */
+    u16 desc;
+    int desc_length;
+    struct axi_dma_sg RxDesc[DESC_COUNT];
+    struct axi_dma_sg TxDesc[DESC_COUNT];
+
+    for (desc = 0; desc < DESC_COUNT; desc++) {
+		for (i = 0; i < BUFFER_SIZE; i++) {
+			TxBuffer[desc][i] = desc + i;
+		}
+	}
+
+ 	for (i = 0; i < DESC_COUNT; i++) {
+		TxDesc[i].nxtdesc = (u32)&TxDesc[i];
+		// TxDesc[i].nxtdesc_msb = 0;
+		TxDesc[i].buffer_address = (u32)&TxBuffer[i][0];
+		// TxDesc[i].buffer_address_msb = 0;
+		// TxDesc[i].reserved = { 0 };
+		TxDesc[i].control = 0xC000000 + sizeof(TxBuffer[i]); // set TXSOF & TXEOF + Buffer Length
+		// TxDesc[i].status = 0;
+		// TxDesc[i].app = { 0 };
+	}
+
+	for (i = 0; i < DESC_COUNT; i++) {
+		RxDesc[i].nxtdesc = (u32)&RxDesc[i];
+		// RxDesc[i].nxtdesc_msb = 0;
+		RxDesc[i].buffer_address = (u32)&RxBuffer[i][0];
+		// RxDesc[i].buffer_address_msb = 0;
+		// RxDesc[i].reserved = { 0 };
+		RxDesc[i].control = sizeof(RxBuffer[i]);
+		// RxDesc[i].status = 0;
+		// RxDesc[i].app = { 0 };
+	}
+
+    desc_length = sizeof(TxDesc) / sizeof(TxDesc[0]);
+
+
     axi_dma = kzalloc(sizeof(struct pci_driver_priv), GFP_KERNEL);
     if (!axi_dma) {
         release_device(pdev);
@@ -181,20 +239,13 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
 	// reg16 |= PCI_COMMAND_MASTER | PCI_COMMAND_IO | PCI_COMMAND_MEMORY;
 	// pci_write_config_word(pdev, PCI_COMMAND, reg16);
 
-
     pci_set_drvdata(pdev, axi_dma);
     pci_set_drvdata(pdev, axi_pci);
 
-	err = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
+    err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
     if (err) {
-        printk(KERN_INFO "pci_set_dma_mask error.\n");
+        printk(KERN_INFO "( ML605 PCIe ) [E] No suitable DMA available, %d\n", err);
         return -EIO;
-    }
-    
-	err = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32));
-    if (err) {
-        printk(KERN_INFO "pci_set_consistent_dma_mask error.\n");
-        return -ENODEV;
     }
 
     pci_read_config_word(pdev, PCI_VENDOR_ID, &vendor); 		// Регистр фирмы изготовителя устройства
@@ -216,19 +267,19 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
     axi_pci->flags  = pci_resource_flags(pdev,  1);
 
     printk(KERN_INFO "( ML605 PCIe ) [I] Initialization process...");
-    printk(KERN_INFO "( ML605 PCIe ) [I] VID/PID            : 0x%04X/0x%04X\n", vendor, device);
-    printk(KERN_INFO "( ML605 PCIe ) [I] IRQ Line           : 0x%02X\n", irq);
-    printk(KERN_INFO "( ML605 PCIe ) [I] Status	            : 0x%04X\n", status);
-    printk(KERN_INFO "( ML605 PCIe ) [I] Cash Line          : 0x%02X\n", cashline);
-    printk(KERN_INFO "( ML605 PCIe ) [I] Latency Timer      : 0x%02X\n", lattimer);
+    printk(KERN_INFO "( ML605 PCIe ) [I] VID/PID                        : 0x%04X/0x%04X\n", vendor, device);
+    printk(KERN_INFO "( ML605 PCIe ) [I] IRQ Line                       : 0x%02X\n", irq);
+    printk(KERN_INFO "( ML605 PCIe ) [I] Status	                        : 0x%04X\n", status);
+    printk(KERN_INFO "( ML605 PCIe ) [I] Cash Line                      : 0x%02X\n", cashline);
+    printk(KERN_INFO "( ML605 PCIe ) [I] Latency Timer                  : 0x%02X\n", lattimer);
     
-    printk(KERN_INFO "( ML605 PCIe ) [I] BAR0 Flags         : 0x%llX\n", axi_dma->flags);
-    printk(KERN_INFO "( ML605 PCIe ) [I] BAR0 Address Range : 0x%llX-0x%llX\n", axi_dma->start, axi_dma->end);
-    printk(KERN_INFO "( ML605 PCIe ) [I] BAR0 Length        : %lld\n", axi_dma->length);
+    printk(KERN_INFO "( ML605 PCIe ) [I] BAR0 Flags                     : 0x%llX\n", axi_dma->flags);
+    printk(KERN_INFO "( ML605 PCIe ) [I] BAR0 Address Range             : 0x%llX-0x%llX\n", axi_dma->start, axi_dma->end);
+    printk(KERN_INFO "( ML605 PCIe ) [I] BAR0 Length                    : %lld\n", axi_dma->length);
 
-    printk(KERN_INFO "( ML605 PCIe ) [I] BAR1 Flags         : 0x%llX\n", axi_pci->flags);
-    printk(KERN_INFO "( ML605 PCIe ) [I] BAR1 Address Range : 0x%llX-0x%llX\n", axi_pci->start, axi_pci->end);
-    printk(KERN_INFO "( ML605 PCIe ) [I] BAR1 Length        : %lld\n", axi_pci->length);
+    printk(KERN_INFO "( ML605 PCIe ) [I] BAR1 Flags                     : 0x%llX\n", axi_pci->flags);
+    printk(KERN_INFO "( ML605 PCIe ) [I] BAR1 Address Range             : 0x%llX-0x%llX\n", axi_pci->start, axi_pci->end);
+    printk(KERN_INFO "( ML605 PCIe ) [I] BAR1 Length                    : %lld\n", axi_pci->length);
 
     /*
     * The following sequence checks if the resource is in the
@@ -244,7 +295,6 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
         return -ENOMEM;
     }
   
-
     if (!(axi_pci->flags & IORESOURCE_MEM)) {
         printk("( ML605 PCIe ) [E] BAR1 IORESOURCE_MEM flag return zero\n");
         return -ENODEV;
@@ -273,6 +323,15 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
         printk(KERN_INFO "( ML605 PCIe ) [E] Could not request MSI interrupt #%d, error %d\n", pdev->irq, err);
     }
 
+    /*
+    * This routine will allocate RAM for that region, so it acts similarly to
+    * __get_free_pages() (but takes size instead of a page order).  If your
+    * driver needs regions sized smaller than a page, you may prefer using
+    * the dma_pool interface, described below.
+    * dma_alloc_coherent() returns two values: the virtual address which you
+    * can use to access it from the CPU and dma_handle which you pass to the
+    * card.
+    */
     if ((dmabuf = dma_alloc_coherent(&pdev->dev, DMA_BUFFER_SIZE, &dma_handle, GFP_USER)) == NULL) {
         printk(KERN_INFO "dma_alloc_coherent error.\n");
         return -ENODEV;
@@ -302,21 +361,21 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
 
     pci_set_master(pdev);
 
-    printk(KERN_INFO "( ML605 PCIe ) [I] MM2S DMA Control Register       : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_MM2S_DMACR));
-    printk(KERN_INFO "( ML605 PCIe ) [I] MM2S DMA Status Register        : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_MM2S_DMASR));
-    printk(KERN_INFO "( ML605 PCIe ) [I] MM2S Current Descriptor Pointer : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_MM2S_CURDESC));
-    printk(KERN_INFO "( ML605 PCIe ) [I] MM2S Tail Descriptor Pointer    : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_MM2S_TAILDESC));
-    printk(KERN_INFO "( ML605 PCIe ) [I] Scatter/Gather User and Cache   : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_SG_CTL));
-    printk(KERN_INFO "( ML605 PCIe ) [I] S2MM DMA Control Register       : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_S2MM_DMACR));
-    printk(KERN_INFO "( ML605 PCIe ) [I] S2MM DMA Status Register        : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_S2MM_DMASR));
-    printk(KERN_INFO "( ML605 PCIe ) [I] S2MM Current Descriptor Pointer : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_S2MM_CURDESC));
-    printk(KERN_INFO "( ML605 PCIe ) [I] S2MM Tail Descriptor Pointer    : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_S2MM_TAILDESC));
+    printk(KERN_INFO "( ML605 PCIe ) [I] MM2S DMA Control Register          : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_MM2S_DMACR));
+    printk(KERN_INFO "( ML605 PCIe ) [I] MM2S DMA Status Register           : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_MM2S_DMASR));
+    printk(KERN_INFO "( ML605 PCIe ) [I] MM2S Current Descriptor Pointer    : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_MM2S_CURDESC));
+    printk(KERN_INFO "( ML605 PCIe ) [I] MM2S Tail Descriptor Pointer       : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_MM2S_TAILDESC));
+    printk(KERN_INFO "( ML605 PCIe ) [I] Scatter/Gather User and Cache      : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_SG_CTL));
+    printk(KERN_INFO "( ML605 PCIe ) [I] S2MM DMA Control Register          : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_S2MM_DMACR));
+    printk(KERN_INFO "( ML605 PCIe ) [I] S2MM DMA Status Register           : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_S2MM_DMASR));
+    printk(KERN_INFO "( ML605 PCIe ) [I] S2MM Current Descriptor Pointer    : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_S2MM_CURDESC));
+    printk(KERN_INFO "( ML605 PCIe ) [I] S2MM Tail Descriptor Pointer       : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_S2MM_TAILDESC));
 
-    printk(KERN_INFO "( ML605 PCIe ) [I] Read PCI PID/VID Register       : 0x%08X\n", ioread32(axi_pci->base_addr));
+    printk(KERN_INFO "( ML605 PCIe ) [I] Read PCI PID/VID Register          : 0x%08X\n", ioread32(axi_pci->base_addr));
 
     printk(KERN_INFO "( ML605 PCIe ) [I] AXI Base Address Translation Configuration\n");
-    printk(KERN_INFO "( ML605 PCIe ) [I] Current Lower Address of BAR0   : 0x%08X\n", ioread32(axi_pci->base_addr + AXIBAR2PCIEBAR_0L));
-    printk(KERN_INFO "( ML605 PCIe ) [I] Current Upper Address of BAR0   : 0x%08X\n", ioread32(axi_pci->base_addr + AXIBAR2PCIEBAR_0U));
+    printk(KERN_INFO "( ML605 PCIe ) [I] Current Lower Address of BAR0      : 0x%08X\n", ioread32(axi_pci->base_addr + AXIBAR2PCIEBAR_0L));
+    printk(KERN_INFO "( ML605 PCIe ) [I] Current Upper Address of BAR0      : 0x%08X\n", ioread32(axi_pci->base_addr + AXIBAR2PCIEBAR_0U));
 
     /* 
     * When the BAR is set to a 32-bit address space, then the translation vector should be placed into the
@@ -325,15 +384,44 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
     * AXIBAR2PCIEBAR_nU and the least significant 32 bits are written into AXIBAR2PCIEBAR_nL.
     */
     iowrite32(dma_handle, axi_pci->base_addr + AXIBAR2PCIEBAR_0L);
-    printk(KERN_INFO "( ML605 PCIe ) [I] Updated Lower Address of BAR0   : 0x%08X\n", ioread32(axi_pci->base_addr + AXIBAR2PCIEBAR_0L));
+    printk(KERN_INFO "( ML605 PCIe ) [I] Updated Lower Address of BAR0      : 0x%08X\n", ioread32(axi_pci->base_addr + AXIBAR2PCIEBAR_0L));
 
-    dma_sync_single_for_cpu(&pdev->dev, dma_handle, DMA_BUFFER_SIZE, DMA_TO_DEVICE);
+
+
+
+    printk(KERN_INFO "( ML605 PCIe ) [I] Descriptors Length                 : %d\n", desc_length);
+
+    iowrite32((desc_length << 16) | 0x1001,    axi_dma->base_addr + AXI_DMA_MM2S_DMACR);    // IRQ Threshold + IOC_IRQ + RS
+    iowrite32(TxDesc[desc_length - 1].nxtdesc, axi_dma->base_addr + AXI_DMA_MM2S_TAILDESC); // Address of the last descriptor
+    
+    while (i != desc_length) {
+        iowrite32(TxDesc[i].buffer_address, axi_dma->base_addr + AXI_DMA_MM2S_CURDESC);
+        i++;
+    }
+
+    printk(KERN_INFO "( ML605 PCIe ) [I] DMA SG TX Done. Check Status       : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_MM2S_DMASR));
+
+
+    iowrite32((desc_length << 16) | 0x1001,    axi_dma->base_addr + AXI_DMA_S2MM_DMACR);    // IRQThreshold + IOC_IrcEn + RS
+    iowrite32(RxDesc[desc_length - 1].nxtdesc, axi_dma->base_addr + AXI_DMA_S2MM_TAILDESC); // Адрес последнего дескриптора
+    while (i != desc_length) {
+        iowrite32(RxDesc[i].buffer_address, axi_dma->base_addr + AXI_DMA_S2MM_CURDESC);
+        i++;
+    }
+
+    printk(KERN_INFO "( ML605 PCIe ) [I] DMA SG RX Done. Check Status       : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_S2MM_DMASR));
+
+
+
+
+
+    // dma_sync_single_for_cpu(&pdev->dev, dma_handle, DMA_BUFFER_SIZE, DMA_TO_DEVICE);
 
     // for(i = 0; i < 256; i++) {
     //     *(u32*)(dmabuf + i)= 0xDEADBEEF;
     // }
 
-    dma_sync_single_for_device(&pdev->dev, dma_handle, DMA_BUFFER_SIZE, DMA_TO_DEVICE);
+    // dma_sync_single_for_device(&pdev->dev, dma_handle, DMA_BUFFER_SIZE, DMA_TO_DEVICE);
 
 
 
@@ -438,6 +526,47 @@ static ssize_t ml605_write(struct file *fil, const char *buf, size_t len, loff_t
     // return len;
     return 0;
 }
+
+
+
+
+
+/* AXI DMA */
+// void dma_sg_init(struct axi_dma_sg *sg, struct axi_dma_buffer *buffer, size_t pkt_size) {
+//     int i;
+//     int size_max = (int) buffer->size/pkt_size;
+//     void *data = buffer->data;
+//     for (i = 0; i < size_max; i++) {
+//         sg[i].nextdesc = &sg[i + 1]; // Адрес следующего дескриптора
+//         sg[i].buffer_address = &data; // данные
+//         iowrite32(sg->control, pkt_size);
+//         data += pkt_size;
+//     }
+// }
+
+// void read_dma_sg(struct axi_dma *dma, struct axi_dma_sg *sg) {
+//     int i = 0;
+//     int length = sizeof(sg)/sizeof(sg[0]); // Подсчёт количества дескрипторов
+//     iowrite32(dma->register_space + AXI_DMA_S2MM_DMACR, (length << 16) | 0x1001);    // IRQThreshold + IOC_IrcEn + RS
+//     iowrite32(dma->register_space + AXI_DMA_S2MM_TAILDESC, sg[length - 1].nextdesc); // Адрес последнего дескриптора
+//     while (i != length) {
+//         iowrite32(dma->register_space + AXI_DMA_S2MM_CURDESC, sg[i].buffer_address);
+//         i++;
+//     }
+// }
+
+// void write_dma_sg(struct axi_dma *dma, struct axi_dma_sg *sg) {
+//     int i = 0;
+//     int length = sizeof(sg)/sizeof(sg[0]); // Number of descriptors
+//     iowrite32(dma->register_space + AXI_DMA_MM2S_DMACR, (length << 16) | 0x1001);    // IRQThreshold + IOC_IrqEn + RS
+//     iowrite32(dma->register_space + AXI_DMA_MM2S_TAILDESC, sg[length - 1].nextdesc); // Адрес последнего дескриптора
+//     while (i != length) {
+//         iowrite32(sg[i].buffer_address, dma->register_space + AXI_DMA_MM2S_CURDESC);
+//         i++;
+//     }
+// }
+/* AXI DMA end */
+
 
 
 
