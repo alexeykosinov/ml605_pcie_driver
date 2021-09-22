@@ -49,6 +49,25 @@ static void *dmabuf = NULL;
 */
 static dma_addr_t dma_handle = 0;
 
+/* Дескриптор AXI DMA Engine */
+struct axi_dma_sg {
+    u32 NEXTDESC;           //
+    u32 NEXTDESC_MSB;       //
+    u32 BUFFER_ADDRESS;     //
+    u32 BUFFER_ADDRESS_MSB; //
+    u32 RESERVED[2];        // не используется
+    u32 CONTROL;            //
+    u32 STATUS;             //
+    u32 APP[5];             //
+    u32 PADDING[3];         // выравнивание до 64 Б
+} __attribute__((aligned(64)));
+
+
+
+
+
+
+
 /* Символьное устройство */
 static dev_t  first;
 static struct class *driver_class = NULL;
