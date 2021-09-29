@@ -12,6 +12,9 @@ MODULE_DEVICE_TABLE(pci, pci_id_table);
 */
 static dma_addr_t dma_handle = 0;
 
+/* 
+* DMA buffer that shares data for AXIBAR
+*/
 static void *dmabuf = NULL;
 
 struct pci_driver_priv *axi_dma = NULL;
@@ -21,12 +24,14 @@ struct pci_driver_priv *axi_pci = NULL;
 static dev_t  first;
 static struct class *driver_class = NULL;
 static struct cdev ml605_cdev;
-static struct device *ml605_device;
+static struct device *ml605_device = NULL;
 static struct file_operations fops = {
+    .owner   = THIS_MODULE,
     .read	 = ml605_read,
     .write	 = ml605_write,
     .open	 = ml605_open,
     .release = ml605_close,
+    .mmap    = ml605_mmap
 };
 
 /* Driver registration */
@@ -41,7 +46,13 @@ void release_device(struct pci_dev *pdev) {
     free_irq(pdev->irq, pdev);
     iounmap(axi_dma->base_addr);
     iounmap(axi_pci->base_addr);
-    dma_free_coherent(&pdev->dev, DMA_BUFFER_SIZE, dmabuf, dma_handle); // release memory for DMA
+    
+    dma_free_coherent(ml605_device, DMA_BUFFER_SIZE, dmabuf, dma_handle); // release memory for DMA
+
+    cdev_del(&ml605_cdev);
+    unregister_chrdev_region(first, MINORMASK);
+    class_destroy(driver_class);
+
     pci_release_region(pdev, pci_select_bars(pdev, IORESOURCE_MEM));
     pci_disable_device(pdev);
 }
@@ -54,8 +65,14 @@ static irqreturn_t ml605_pci_irq(int irq, void *lp){
 static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
     int i;
     int err;
+    int dev_major;
     u16 vendor, device, status;
     u8 irq, cashline, lattimer;
+
+    /* DMA TEST */
+    // int cnt_err = 0;
+
+    
 
     axi_dma = kzalloc(sizeof(struct pci_driver_priv), GFP_KERNEL);
     if (!axi_dma) {
@@ -69,7 +86,7 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
         return -ENOMEM;
     }
 
-    /* Инициализируем память устройства
+    /*
     * Initialize device before it's used by a driver
     * Ask low-level code to enable Memory resources
     * Wake up the device if it was suspended
@@ -101,14 +118,14 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
         return -EIO;
     }
 
-    pci_read_config_word(pdev, PCI_VENDOR_ID, &vendor); 		// PCI Vendor ID, Device ID
-    pci_read_config_word(pdev, PCI_DEVICE_ID, &device); 		// Регистр ID устройства
-    pci_read_config_byte(pdev, PCI_INTERRUPT_LINE, &irq);		// Регистр прерываний
-    pci_read_config_word(pdev, PCI_STATUS, &status);			// Регистр статуса
-    pci_read_config_byte(pdev, PCI_CACHE_LINE_SIZE, &cashline);	// Регистр размера кеш-линии
-    pci_read_config_byte(pdev, PCI_LATENCY_TIMER, &lattimer);	// Задержка для устройсва
+    pci_read_config_word(pdev, PCI_VENDOR_ID, &vendor);
+    pci_read_config_word(pdev, PCI_DEVICE_ID, &device);
+    pci_read_config_byte(pdev, PCI_INTERRUPT_LINE, &irq);
+    pci_read_config_word(pdev, PCI_STATUS, &status);
+    pci_read_config_byte(pdev, PCI_CACHE_LINE_SIZE, &cashline);
+    pci_read_config_byte(pdev, PCI_LATENCY_TIMER, &lattimer);
 
-    /* Второй аргумент это один из шести [0-5] базовых адресных регистров (BARs) */
+    /* Second arg is one of six [0-5] BARs */
     axi_dma->start  = pci_resource_start(pdev,  0);
     axi_dma->end    = pci_resource_end(pdev,    0);
     axi_dma->length = pci_resource_len(pdev,    0);
@@ -158,7 +175,7 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
         return -ENOMEM;
     }
 
-    /* Включение MSI прерываний */
+    /* Enable MSI IRQ */
     if (!pci_enable_msi(pdev)) {
         if (!pdev->msi_enabled) { 
             printk(KERN_INFO "( ML605 PCIe ) [E] MSI interrupt disabled\n");
@@ -166,10 +183,8 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
     }
 
     /* 
-    * Запрос и установка коллбека функции прерываний 
-    * Проверить корректность можно через cat /proc/interrupts
-    * Там должен быть устройство с названием PCI_DRIVER_NAME
-    * Там же можно увидеть номер прерывания
+    * Request and setup IRQ
+    * Check: cat /proc/interrupts/[PCI_DRIVER_NAME]
     */
     err = request_irq(pdev->irq, ml605_pci_irq, IRQF_SHARED, PCI_DRIVER_NAME, pdev);
     if (err < 0) {
@@ -185,12 +200,25 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
     * can use to access it from the CPU and dma_handle which you pass to the
     * card.
     */
-    if ((dmabuf = dma_alloc_coherent(&pdev->dev, DMA_BUFFER_SIZE, &dma_handle, GFP_DMA)) == NULL) {
+    if ((dmabuf = dma_alloc_coherent(&pdev->dev, DMA_BUFFER_SIZE, &dma_handle, GFP_KERNEL)) == NULL) {
         printk(KERN_INFO "( ML605 PCIe ) [E] DMA Allocates a region of %d bytes of memory failed\n", DMA_BUFFER_SIZE);
         return -ENODEV;
     }
 
-    /* Запрашиваем необходимый регион памяти
+    /* Fill DMA buffer with test values */
+    // dmabuf = kmalloc(BUFFER_SIZE, GFP_KERNEL | GFP_DMA);
+    // for (i = 0; i < BUFFER_SIZE; i+=4) { *(u32*)(dmabuf + i) = 0xAAAAAAAA; }
+
+    // dma_handle = dma_map_single(&pdev->dev, dmabuf, BUFFER_SIZE, DMA_TO_DEVICE);
+    // if (dma_mapping_error(&pdev->dev, dma_handle)) {
+    //     printk(KERN_INFO "( ML605 PCIe ) [E] DMA Map Single Error\n");
+    //     kfree(dmabuf);
+    //     return -ENODEV;
+    // }
+
+    printk(KERN_INFO "( ML605 PCIe ) [I] DMA Physical Memory Address    : 0x%p\n", (void *)dma_handle);
+
+    /*
     * Mark the PCI region associated with PCI device pdev BAR bar as being reserved by owner res_name.
     * Do not access any address inside the PCI regions unless this call returns successfully.
     * Returns 0 on success, or EBUSY on error.
@@ -212,21 +240,7 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
 
     pci_set_master(pdev);
 
-    // printk(KERN_INFO "( ML605 PCIe ) [I] MM2S DMA Control Register          : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_MM2S_DMACR));
-    // printk(KERN_INFO "( ML605 PCIe ) [I] MM2S DMA Status Register           : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_MM2S_DMASR));
-    // printk(KERN_INFO "( ML605 PCIe ) [I] MM2S Current Descriptor Pointer    : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_MM2S_CURDESC));
-    // printk(KERN_INFO "( ML605 PCIe ) [I] MM2S Tail Descriptor Pointer       : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_MM2S_TAILDESC));
-    // printk(KERN_INFO "( ML605 PCIe ) [I] Scatter/Gather User and Cache      : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_SG_CTL));
-    // printk(KERN_INFO "( ML605 PCIe ) [I] S2MM DMA Control Register          : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_S2MM_DMACR));
-    // printk(KERN_INFO "( ML605 PCIe ) [I] S2MM DMA Status Register           : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_S2MM_DMASR));
-    // printk(KERN_INFO "( ML605 PCIe ) [I] S2MM Current Descriptor Pointer    : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_S2MM_CURDESC));
-    // printk(KERN_INFO "( ML605 PCIe ) [I] S2MM Tail Descriptor Pointer       : 0x%08X\n", ioread32(axi_dma->base_addr + AXI_DMA_S2MM_TAILDESC));
-
-    printk(KERN_INFO "( ML605 PCIe ) [I] Read PCI PID/VID Register          : 0x%08X\n", ioread32(axi_pci->base_addr));
-
-    printk(KERN_INFO "( ML605 PCIe ) [I] AXI Base Address Translation Configuration\n");
-    printk(KERN_INFO "( ML605 PCIe ) [I] Current Lower Address of BAR0      : 0x%08X\n", ioread32(axi_pci->base_addr + AXIBAR2PCIEBAR_0L));
-    printk(KERN_INFO "( ML605 PCIe ) [I] Current Upper Address of BAR0      : 0x%08X\n", ioread32(axi_pci->base_addr + AXIBAR2PCIEBAR_0U));
+    printk(KERN_INFO "( ML605 PCIe ) [I] Read PCI PID/VID Register      : 0x%08X\n", ioread32(axi_pci->base_addr));
 
     /* 
     * When the BAR is set to a 32-bit address space, then the translation vector should be placed into the
@@ -234,51 +248,38 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
     * address space, then the translation’s most significant 32 bits are written into the
     * AXIBAR2PCIEBAR_nU and the least significant 32 bits are written into AXIBAR2PCIEBAR_nL.
     */
-
-    for (i = 0; i < 256; i+=4) { 
-        *(u32*)(dmabuf + i)= 0xDEADBEEF;
-    }
-
-    printk(KERN_INFO "( ML605 PCIe ) [I] DMA Virtual Memory Address         : 0x%p\n", dmabuf);
-    printk(KERN_INFO "( ML605 PCIe ) [I] DMA Physical Memory Address        : 0x%p\n", (void *)dma_handle);
-
     iowrite32( (dma_handle >> 32)        , axi_pci->base_addr + AXIBAR2PCIEBAR_0U);
     iowrite32( (dma_handle  & 0xFFFFFFFF), axi_pci->base_addr + AXIBAR2PCIEBAR_0L);
 
-    printk(KERN_INFO "( ML605 PCIe ) [I] Updated Upper Address of BAR0      : 0x%08X\n", ioread32(axi_pci->base_addr + AXIBAR2PCIEBAR_0U));
-    printk(KERN_INFO "( ML605 PCIe ) [I] Updated Lower Address of BAR0      : 0x%08X\n", ioread32(axi_pci->base_addr + AXIBAR2PCIEBAR_0L));
+    printk(KERN_INFO "( ML605 PCIe ) [I] AXI BAR Address (new)          : 0x%08X%08X\n", ioread32(axi_pci->base_addr + AXIBAR2PCIEBAR_0U), 
+                                                                                         ioread32(axi_pci->base_addr + AXIBAR2PCIEBAR_0L));
 
-
-    // DMA_Print_DMASR(axi_dma, 0);
-    // DMA_Print_DMASR(axi_dma, 1);
-    // DMA_Print_DMACR(axi_dma, 0);
-    // DMA_Print_DMACR(axi_dma, 1);
-
-
-    /* Reset MM2S & S2MM DMA */
-    // iowrite32(AXI_DMA_DMACR_Reset, axi_dma->base_addr + AXI_DMA_MM2S_DMACR);
-    // iowrite32(AXI_DMA_DMACR_Reset, axi_dma->base_addr + AXI_DMA_S2MM_DMACR);
-
-    // iowrite32(AXI_DMA_DMACR_IOC_IrqEn | AXI_DMA_DMACR_ERR_IrqEn, axi_dma->base_addr + AXI_DMA_MM2S_DMACR);
-    // iowrite32(AXI_DMA_DMACR_IOC_IrqEn | AXI_DMA_DMACR_ERR_IrqEn, axi_dma->base_addr + AXI_DMA_S2MM_DMACR);
-
-    // DMA_Print_DMASR(axi_dma, 0);
-    // DMA_Print_DMASR(axi_dma, 1);
-    // DMA_Print_DMACR(axi_dma, 0);
-    // DMA_Print_DMACR(axi_dma, 1);
-
-    // /* AXI DMA Stuff */
+    /*
+    // * If you need to use the same streaming DMA region multiple times and touch
+    // * the data in between the DMA transfers, the buffer needs to be synced
+    // * properly in order for the CPU and device to see the most up-to-date and
+    // * correct copy of the DMA buffer.
+    // * After each DMA transfer call:
+    */
     dma_sync_single_for_cpu(&pdev->dev, dma_handle, DMA_BUFFER_SIZE, DMA_TO_DEVICE);
-    for(i = 0; i < 256; i+=4){
+    
+    for(i = 0; i < 64; i+=4){
         printk(KERN_INFO "( ML605 PCIe ) [I] %d : 0x%08X\n", i, *(u32 *)(dmabuf + i));
     }
+
+    /*
+    // * Then, if you wish to let the device get at the DMA area again,
+    // * finish accessing the data with the CPU, and then before actually
+    // * giving the buffer to the hardware call:
+    */
     dma_sync_single_for_device(&pdev->dev, dma_handle, DMA_BUFFER_SIZE, DMA_TO_DEVICE);
 
-    for(i = 0; i < 256; i+=4){
-        printk(KERN_INFO "( ML605 PCIe ) [I] %d : 0x%08X\n", i, *(u32 *)(dmabuf + i));
-    }
 
-    /* Доступ к устройству со стороны пользовательского пространства */
+
+
+
+
+    /* Char device initialization */
 
     /* 
     * Allocates a range of char device numbers
@@ -286,9 +287,11 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
     * Returns zero or a negative error code
     */
     if (alloc_chrdev_region(&first, 0, 1, PCI_DRIVER_NAME) < 0) {
-        printk(KERN_INFO "( ML605 PCIe ) [E] Allocates a range of char device numbers is failed\n");
+        printk(KERN_INFO "( ML605 PCIe ) [E] Major number allocation is failed\n");
         return -1;
     }
+
+    dev_major = MAJOR(first);
 
     /*
     * This is used to create a struct class pointer that can then be used in calls to device_create.
@@ -302,26 +305,11 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
         return -1;
     }
 
-    /* 
-    * Simple interfaces attached to a subsystem. 
-    * Multiple interfaces can attach to a subsystem and its devices. 
-    * Unlike drivers, they do not exclusively claim or control devices. 
-    * Interfaces usually represent a specific functionality of a subsystem/class of devices.
-    * Y'll see the name in /dev/
-    */
-    ml605_device = device_create(driver_class, NULL, first, NULL, "ml605");
-    if (ml605_device == NULL) {
-        printk(KERN_INFO "( ML605 PCIe ) [E] Create device failed\n");
-        class_destroy(driver_class);
-        unregister_chrdev_region(first, 1);
-        return -1;
-    }
-
     /*
     * Initializes cdev, remembering fops, making it ready to add to the system with cdev_add
     */
     cdev_init(&ml605_cdev, &fops);
-    if (cdev_add(&ml605_cdev, first, 1) == -1){
+    if (cdev_add(&ml605_cdev, MKDEV(dev_major, 0), 1) == -1){
         printk(KERN_INFO "( ML605 PCIe ) [E] Create character device failed\n");
         device_destroy(driver_class, first);
         class_destroy(driver_class);
@@ -329,140 +317,33 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent) {
         return -1;
     }
 
-    return 0;
+    /* 
+    * Simple interfaces attached to a subsystem. 
+    * Multiple interfaces can attach to a subsystem and its devices. 
+    * Unlike drivers, they do not exclusively claim or control devices. 
+    * Interfaces usually represent a specific functionality of a subsystem/class of devices.
+    * Y'll see the name in /dev/
+    */
+    ml605_device = device_create(driver_class, NULL, MKDEV(dev_major, 0), NULL, "ml605_pcie-0");
+    if (ml605_device == NULL) {
+        printk(KERN_INFO "( ML605 PCIe ) [E] Create device failed\n");
+        class_destroy(driver_class);
+        unregister_chrdev_region(first, 1);
+        return -1;
+    }
 
+    return 0;
 }
 
 
 
-/* Освобождение занятых ресурсов */
+/* Clean up */
 static void pci_remove(struct pci_dev *pdev) {
     release_device(pdev);
 }
 
 
-
-
-
-/* AXI DMA */
-static void DMA_Print_DMASR(struct pci_driver_priv *dma, bool MM2S) {
-    u32 dmasr_temp = 0;
-
-    if (MM2S) {
-        dmasr_temp = ioread32(axi_dma->base_addr + AXI_DMA_S2MM_DMASR);
-        printk(KERN_INFO "( ML605 PCIe ) [I] S2MM:");
-    }
-    else{
-        dmasr_temp = ioread32(axi_dma->base_addr + AXI_DMA_MM2S_DMASR);
-        printk(KERN_INFO "( ML605 PCIe ) [I] MM2S:");
-    }
-
-    printk(KERN_INFO "( ML605 PCIe ) [I] DMASR.Halted    = %d\n", CHECK_BIT(dmasr_temp, 0)  ? 1 : 0);
-    printk(KERN_INFO "( ML605 PCIe ) [I] DMASR.Idle      = %d\n", CHECK_BIT(dmasr_temp, 1)  ? 1 : 0);
-    printk(KERN_INFO "( ML605 PCIe ) [I] DMASR.SGIncld   = %d\n", CHECK_BIT(dmasr_temp, 3)  ? 1 : 0);
-    printk(KERN_INFO "( ML605 PCIe ) [I] DMASR.DMAIntErr = %d\n", CHECK_BIT(dmasr_temp, 4)  ? 1 : 0);
-    printk(KERN_INFO "( ML605 PCIe ) [I] DMASR.DMASlvErr = %d\n", CHECK_BIT(dmasr_temp, 5)  ? 1 : 0);
-    printk(KERN_INFO "( ML605 PCIe ) [I] DMASR.DMADecErr = %d\n", CHECK_BIT(dmasr_temp, 6)  ? 1 : 0);
-    printk(KERN_INFO "( ML605 PCIe ) [I] DMASR.SGIntErr  = %d\n", CHECK_BIT(dmasr_temp, 8)  ? 1 : 0);
-    printk(KERN_INFO "( ML605 PCIe ) [I] DMASR.SGSlvErr  = %d\n", CHECK_BIT(dmasr_temp, 9)  ? 1 : 0);
-    printk(KERN_INFO "( ML605 PCIe ) [I] DMASR.SGDecErr  = %d\n", CHECK_BIT(dmasr_temp, 10) ? 1 : 0);
-    printk(KERN_INFO "( ML605 PCIe ) [I] DMASR.IOC_Irq   = %d\n", CHECK_BIT(dmasr_temp, 12) ? 1 : 0);
-    printk(KERN_INFO "( ML605 PCIe ) [I] DMASR.Dly_Irq   = %d\n", CHECK_BIT(dmasr_temp, 13) ? 1 : 0);
-    printk(KERN_INFO "( ML605 PCIe ) [I] DMASR.Err_Irq   = %d\n", CHECK_BIT(dmasr_temp, 14) ? 1 : 0);
-}
-
-static void DMA_Print_DMACR(struct pci_driver_priv *dma, bool MM2S) {
-    u32 dmacr_temp = 0;
-
-    if (MM2S) {
-        dmacr_temp = ioread32(axi_dma->base_addr + AXI_DMA_S2MM_DMACR);
-        printk(KERN_INFO "( ML605 PCIe ) [I] S2MM:");
-    }
-    else{
-        dmacr_temp = ioread32(axi_dma->base_addr + AXI_DMA_MM2S_DMACR);
-        printk(KERN_INFO "( ML605 PCIe ) [I] MM2S:");
-    }
-
-    printk(KERN_INFO "( ML605 PCIe ) [I] DMACR.RS        = %d\n", CHECK_BIT(dmacr_temp, 0)  ? 1 : 0);
-    printk(KERN_INFO "( ML605 PCIe ) [I] DMACR.Reset     = %d\n", CHECK_BIT(dmacr_temp, 2)  ? 1 : 0);
-    printk(KERN_INFO "( ML605 PCIe ) [I] DMACR.IOC_IrqEn = %d\n", CHECK_BIT(dmacr_temp, 12) ? 1 : 0);
-    printk(KERN_INFO "( ML605 PCIe ) [I] DMACR.Dly_IrqEn = %d\n", CHECK_BIT(dmacr_temp, 13) ? 1 : 0);
-    printk(KERN_INFO "( ML605 PCIe ) [I] DMACR.ERR_IrqEn = %d\n", CHECK_BIT(dmacr_temp, 14) ? 1 : 0);
-}
-
-// static void DMA_Transfer(struct pci_driver_priv *dma, buffer_t *buff, uint16_t count) {
-
-// 	int descriptor;
-
-// 	for (descriptor = 0; descriptor < count; descriptor++) {
-// 		_descriptor_list[descriptor].BUFFER_ADDRESS = (uintptr_t)buff[descriptor].data;
-// 		_descriptor_list[descriptor].STATUS = 0;
-	
-//         if (descriptor == 0) { // Если первый дескриптор - 27 бит TXSOF (Transmit Start of Frame) в 1
-// 			_descriptor_list[descriptor].NXTDESC = (uintptr_t) &_descriptor_list[descriptor + 1];
-// 			_descriptor_list[descriptor].CONTROL = (buff[descriptor].size| (1 << 27));
-//         }
-// 		else if (descriptor == count - 1) { // Если последний - 26 бит - TXEOF (Transmit End Of Frame) в 1
-// 			_descriptor_list[descriptor].NXTDESC = (uintptr_t) &_descriptor_list[0];
-// 			_descriptor_list[descriptor].CONTROL = (buff[descriptor].size | (1 << 26));
-// 		}
-// 		else {
-// 			_descriptor_list[descriptor].NXTDESC = (uintptr_t) &_descriptor_list[descriptor + 1];
-// 			_descriptor_list[descriptor].CONTROL = buff[descriptor].size;
-// 		}
-// 	}
-
-//     iowrite32((uintptr_t)&_descriptor_list[0], dma->base_addr + AXI_DMA_MM2S_CURDESC); // Адрес первого дескрипотора
-//     iowrite32((uintptr_t)&_descriptor_list[count - 1], dma->base_addr + AXI_DMA_MM2S_TAILDESC); // Адрес последнего дескриптора
-//     iowrite32((count << 16) | 0x1001, dma->base_addr + AXI_DMA_MM2S_DMACR); // IRQThreshold + IOC_IrqEn + RS
-// }
-
-
-/*
-void dma_sg_init(struct axi_dma_sg *sg, struct axi_dma_buffer *buffer, size_t pkt_size) {
-    int i;
-    int size_max = (int) buffer->size/pkt_size;
-    void *data = buffer->data;
-    for (i = 0; i < size_max; i++) {
-        sg[i].nxtdesc = &sg[i + 1]; // Адрес следующего дескриптора
-        sg[i].buffer_address = &data; // данные
-        iowrite32(pkt_size, sg->control);
-        data += pkt_size;
-    }
-}
-
-void dma_sg_init_sparse(struct axi_dma_sg *sg, struct axi_dma_buffer **buffers, size_t num_buffers, size_t pkt_size){
-  int i = 0;
-  for(i = 0; i < num_buffers; i++){
-    dma_sg_init(sg, buffers[i], pkt_size);
-    sg = sg->nxtdesc;
-  }
-}
-
-void dma_sg_read(struct pci_driver_priv *axi_dma, struct axi_dma_sg *sg) {
-    int i = 0;
-    int length = sizeof(sg)/sizeof(sg[0]); // Подсчёт количества дескрипторов
-    iowrite32((length << 16) | 0x1001, axi_dma->base_addr + AXI_DMA_S2MM_DMACR);    // IRQThreshold + IOC_IrcEn + RS
-    iowrite32(sg[length - 1].nxtdesc, axi_dma->base_addr + AXI_DMA_S2MM_TAILDESC); // Адрес последнего дескриптора
-    while (i != length) {
-        iowrite32(sg[i].buffer_address, axi_dma->base_addr + AXI_DMA_S2MM_CURDESC);
-        i++;
-    }
-}
-
-void dma_sg_write(struct pci_driver_priv *axi_dma, struct axi_dma_sg *sg) {
-    int i = 0;
-    int length = sizeof(sg)/sizeof(sg[0]); // Number of descriptors
-    iowrite32((length << 16) | 0x1001, axi_dma->base_addr + AXI_DMA_MM2S_DMACR);    // IRQThreshold + IOC_IrqEn + RS
-    iowrite32(sg[length - 1].nxtdesc, axi_dma->base_addr + AXI_DMA_MM2S_TAILDESC); // Адрес последнего дескриптора
-    while (i != length) {
-        iowrite32(sg[i].buffer_address, axi_dma->base_addr + AXI_DMA_MM2S_CURDESC);
-        i++;
-    }
-}
-*/
-/* AXI DMA end */
-
+/* char device functions */
 static int ml605_open(struct inode *inod, struct file *fil){
     printk(KERN_INFO "( ML605 PCIe ) [I] Char device opened\n");
     return 0;
@@ -474,32 +355,63 @@ static int ml605_close(struct inode *inod, struct file *fil){
 }
 
 static ssize_t ml605_read(struct file *fil, char *buf, size_t len, loff_t *off){
-    // int n;
-    // Return the result only once (otherwise a simple cat will loop)
-    // Copy from kernel space to user space
-    // printk(KERN_INFO "( ML605 PCIe ) [I] Reading device rx: %d\n", (int) len);
+    unsigned long res;
+    dma_sync_single_for_cpu(ml605_device, dma_handle, len, DMA_FROM_DEVICE);
+    res = copy_to_user(buf, dmabuf, len);
+    dma_sync_single_for_device(ml605_device, dma_handle, len, DMA_FROM_DEVICE);
 
-    // n = sprintf(ker_buf, "%d\n", *regA);
-    // Copy back to user the result (to,from,size)
-    // copy_to_user(buf, ker_buf, n);
-    // printk(KERN_INFO "( ML605 PCIe ) [I] Returning %s rx: %d\n", ker_buf, n);
-    printk(KERN_INFO "( ML605 PCIe ) [I] Performing read operation\n");
-    // return n;
+    if (res != 0) {
+        printk( "( ML605 PCIe ) [E] Failed to send characters to user, %ld\n", res);
+        return -EFAULT;
+    }
+    printk(KERN_INFO "( ML605 PCIe ) [I] Performing read operation, %ld\n", res);
     return 0;
 }
 
 static ssize_t ml605_write(struct file *fil, const char *buf, size_t len, loff_t *off){
-    // Get data from user space to kernel space
-    // copy_from_user(ker_buf, buf, len);
-    // sscanf(ker_buf,"%d%c", &operand_1);
-    // ker_buf[len] = 0;
-    // Change the IP registers to the parsed operands (on rega and regb)
-    // *regA = (unsigned int) operand_1;
-    printk(KERN_INFO "( ML605 PCIe ) [I] Performing write operation\n");
-    // return len;
+    unsigned long res;
+    dma_sync_single_for_cpu(ml605_device, dma_handle, len, DMA_TO_DEVICE); 
+
+    res = copy_from_user(dmabuf, buf, len);
+
+    dma_sync_single_for_device(ml605_device, dma_handle, len, DMA_TO_DEVICE);
+
+    if (res != 0) {
+        printk( "( ML605 PCIe ) [E] Failed to send characters to user, %ld\n", res);
+        return -EFAULT;
+    }
+
+    printk(KERN_INFO "( ML605 PCIe ) [I] Performing write operation, %ld\n", res);
     return 0;
 }
 
+static int ml605_mmap(struct file *filp, struct vm_area_struct *vma) {
+
+    unsigned long vsize;
+    unsigned long off;
+    int res;
+
+    off = vma->vm_pgoff;
+    vsize = vma->vm_end - vma->vm_start;
+
+    if (off < 0) {
+        printk(KERN_INFO "( ML605 PCIe ) [E] vm_pgoff empty\n");
+        return -EINVAL;
+    }
+
+    if (vsize > DMA_BUFFER_SIZE) {
+        printk(KERN_INFO "( ML605 PCIe ) [E] vsize (%ld) > DMA_BUFFER_SIZE\n", vsize);
+        return -EINVAL;
+    }
+
+    printk(KERN_INFO "( ML605 PCIe ) [I] Mapping with dma_map_coherent DMA buffer at phys: 0x%p virt 0x%p\n", (void *)dma_handle, dmabuf);
+    res = dma_mmap_coherent(ml605_device, vma, dmabuf, dma_handle,  vsize);
+
+    if (res) {
+        printk(KERN_INFO "( ML605 PCIe ) [E] Unable to map DMA buffer at phys: 0x%p\n", (void *)dma_handle);
+    }
+    return res;
+}
 
 module_init(pci_init);
 module_exit(pci_exit);

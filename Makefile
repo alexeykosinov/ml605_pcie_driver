@@ -24,6 +24,9 @@ install:
 	cp $(BINARY).ko $(TARGET_PATH)
 	depmod -a
 
+app:
+	gcc xil_pci_app.c -o bin/xil_pci_app
+
 remove:
 	rm $(TARGET_PATH)/$(BINARY).ko 
 

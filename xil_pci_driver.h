@@ -25,7 +25,7 @@
 
 #define CHECK_BIT(var, pos) ((var) & (1 << (pos)))
 
-#define PCI_DRIVER_NAME		    "ML605_PCIe"
+#define PCI_DRIVER_NAME		    "ml605_pcie"
 #define PCI_VID				    0x10EE 	    /* Xilinx 			                */
 #define PCI_PID				    0x0505 	    /* Device ID 		                */
 
@@ -95,37 +95,8 @@
 #define AXIBAR2PCIEBAR_0U       0X208
 #define AXIBAR2PCIEBAR_0L       0X20C
 
-
-#define DESC_COUNT 4
-#define BUFFER_SIZE 64
-
-/* Дескриптор AXI DMA Engine */
-// typedef struct {
-// 	uint32_t NXTDESC;
-// 	uint32_t NXTDESC_MSB;
-// 	uint32_t BUFFER_ADDRESS;
-// 	uint32_t BUFFER_ADDRESS_MSB;
-// 	uint32_t RESERVED[2];
-// 	uint32_t CONTROL;
-// 	uint32_t STATUS;
-// 	uint32_t APP[5];
-// 	uint32_t PAD[3];
-// } axi_dma_descriptor_t;
-
-// typedef struct {
-//     uint32_t size;
-//     void *data;
-// } buffer_t;
-
-
-
-
-
-// void dma_sg_init(struct axi_dma_sg *sg, struct axi_dma_buffer *buffer, size_t pkt_size);
-// void dma_sg_init_sparse(struct axi_dma_sg *sg, struct axi_dma_buffer **buffers, size_t num_buffers, size_t pkt_size);
-// void dma_sg_read(struct pci_driver_priv *axi_dma, struct axi_dma_sg *sg);
-// void dma_sg_write(struct pci_driver_priv *axi_dma, struct axi_dma_sg *sg);
-
+#define DESC_COUNT              4
+#define BUFFER_SIZE             64
 
 static int 		pci_probe(struct pci_dev *pdev, const struct pci_device_id *id);
 static void 	pci_remove(struct pci_dev *pdev);
@@ -163,12 +134,5 @@ static int 		ml605_open(struct inode *inod, struct file *fil);
 static int 		ml605_close(struct inode *inod, struct file *fil);
 static ssize_t 	ml605_read(struct file *fil, char *buf, size_t len, loff_t *off);
 static ssize_t 	ml605_write(struct file *fil, const char *buf, size_t len, loff_t *off);
-
-
-
-/* DMA functions */
-// static void DMA_Transfer(struct pci_driver_priv *dma, buffer_t *buff, uint16_t count);
-static void DMA_Print_DMASR(struct pci_driver_priv *dma, bool MM2S);
-static void DMA_Print_DMACR(struct pci_driver_priv *dma, bool MM2S);
-
+static int      ml605_mmap(struct file *filp, struct vm_area_struct *vma);
 #endif
